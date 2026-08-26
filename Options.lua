@@ -127,11 +127,17 @@ local function BuildPanel()
 		"Marks nameplate aura cooldowns as opted out of third party cooldown text. Timer addons that honour the standard flag will skip them too, everywhere else they keep working.",
 		true, extrasHeader, 10
 	)
+	local forceText = CreateCheckbox(
+		"forceHideText",
+		"Force-hide any leftover timer text",
+		"Hides text that a timer addon has already drawn on top of a nameplate aura icon, for the ones that ignore the opt-out flag. Only text sitting on a nameplate aura cooldown is touched.",
+		true, thirdParty, 4
+	)
 	local swipe = CreateCheckbox(
 		"hideSwipe",
 		"Also hide the cooldown swipe",
 		"Removes the dark sweeping shade from nameplate aura icons as well, leaving a plain icon.",
-		true, thirdParty, 4
+		true, forceText, 4
 	)
 
 	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -148,7 +154,7 @@ local function BuildPanel()
 
 	local hint = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
 	hint:SetPoint("TOPLEFT", reset, "BOTTOMLEFT", 0, -12)
-	hint:SetText("Slash commands: /nnn, /nonameplatenumbers, /nnn toggle")
+	hint:SetText("Slash commands: /nnn, /nnn toggle, /nnn debug (prints what the addon sees on your target's nameplate)")
 
 	panel:SetScript("OnShow", ns.UpdateOptions)
 end
@@ -194,7 +200,11 @@ SLASH_NONAMEPLATENUMBERS2 = "/nonameplatenumbers"
 SlashCmdList.NONAMEPLATENUMBERS = function(msg)
 	msg = (msg or ""):lower():match("^%s*(.-)%s*$")
 
-	if msg == "toggle" or msg == "on" or msg == "off" then
+	if msg == "debug" then
+		ns.Debug()
+		return
+
+	elseif msg == "toggle" or msg == "on" or msg == "off" then
 		if msg == "toggle" then
 			ns.db.enabled = not ns.db.enabled
 		else
