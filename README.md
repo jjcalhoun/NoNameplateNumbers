@@ -41,7 +41,7 @@ Open **Game Menu → Options → AddOns → NoNameplateNumbers**, or type `/nnn`
 | Friendly nameplates | on | Auras on friendly nameplates. |
 | Personal resource display | on | Auras on your own nameplate. |
 | Also suppress timer addons | on | Marks the cooldowns with `noCooldownCount`, the flag OmniCC, ElvUI and friends honour, so their text stays off these icons too. |
-| Force-hide any leftover timer text | on | For timer addons that ignore that flag: hides text already drawn on a nameplate aura cooldown. Only text sitting on a nameplate aura cooldown is touched, and it is shown again if you turn the addon off. |
+| Also hide timer text drawn as plain text | on | Not every timer is the cooldown widget's own countdown — Blizzard draws the duration as ordinary text on some patches, and some timer addons ignore the opt-out flag. This hides that text too. Only text on a nameplate aura icon is touched, stack counts are left alone, and everything is shown again if you turn the addon off. |
 | Also hide the cooldown swipe | off | Extra: removes the dark sweeping shade from nameplate aura icons as well. |
 
 Settings are saved per account and take effect immediately — no reload needed.
@@ -67,7 +67,13 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   never touched again — action bars, buff frame and everything else are
   untouched.
 * Nameplate ones get `SetHideCountdownNumbers(true)`, plus `noCooldownCount`
-  for third party timers and, optionally, any leftover text hidden.
+  for third party timers.
+* Timer text that is *not* the cooldown widget's own countdown — a plain font
+  string on the aura icon — is hidden by alpha and `Hide()`, so an `OnUpdate`
+  that only calls `SetText` cannot bring it back. Font strings whose parent key
+  looks like a stack count are left alone.
+* Nameplates can contain forbidden frames, and touching one throws, so every
+  walk skips them instead of dying halfway through.
 * `NAME_PLATE_UNIT_ADDED` walks the plate once to pick up auras that were
   already running (right after login, for instance) and to re-decide
   enemy/friendly/personal when a nameplate is recycled onto a new unit.
@@ -86,13 +92,15 @@ read the output:
 
 * **"cooldown hook: FAILED"** — the widget hook could not be installed on this
   client; please report it.
-* **"cooldowns found on that plate: 0"** — the numbers are not being drawn by a
-  cooldown widget on the nameplate at all, which usually means a nameplate
-  addon (Plater, Kui, ElvUI nameplates) is drawing that nameplate instead of
-  Blizzard. Use that addon's own aura settings.
-* **`text "8" on ...`** lines — something is drawing the number as plain text.
-  The frame name in that line says who owns it; turn on "Force-hide any
-  leftover timer text" if it is off.
+* **"0 cooldowns"** — the numbers are not being drawn by a cooldown widget on
+  the nameplate at all, which usually means a nameplate addon (Plater, Kui,
+  ElvUI nameplates) is drawing that nameplate instead of Blizzard. Use that
+  addon's own aura settings.
+* **`text "8" shown=true hiddenByUs=false on <frame>`** — something is drawing
+  that number as plain text and the addon is not catching it. The frame name at
+  the end of the line says exactly who owns it; that is the line to report.
+* **"scan failed: ..."** — the walk hit something it could not read; report the
+  message.
 
 ## Notes
 

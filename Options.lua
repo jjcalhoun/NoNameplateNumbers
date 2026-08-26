@@ -129,8 +129,8 @@ local function BuildPanel()
 	)
 	local forceText = CreateCheckbox(
 		"forceHideText",
-		"Force-hide any leftover timer text",
-		"Hides text that a timer addon has already drawn on top of a nameplate aura icon, for the ones that ignore the opt-out flag. Only text sitting on a nameplate aura cooldown is touched.",
+		"Also hide timer text drawn as plain text",
+		"Some patches and some timer addons draw the aura duration as ordinary text rather than as the cooldown's own countdown. This hides that too. Only text on a nameplate aura icon is touched, and stack counts are left alone.",
 		true, thirdParty, 4
 	)
 	local swipe = CreateCheckbox(
