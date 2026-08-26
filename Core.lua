@@ -2,22 +2,27 @@
 -- Hides the aura timer text on the default nameplates, and leaves cooldown
 -- numbers everywhere else in the game untouched.
 --
--- Two things make this less straightforward than it sounds:
+-- Three things shape how this works:
 --
---  * Blizzard renames nameplate frame keys between expansions, so cooldowns are
---    found by asking every cooldown that starts whether it lives under a
---    nameplate, not by looking for UnitFrame.BuffFrame and friends.
---  * Since 12.0 a lot of aura data is a "secret value": addon code may hold it
---    but not read or compare it, and trying throws. So no value that came out
---    of a Blizzard frame is ever compared here without a pcall around it, and
---    nothing is left in a half-applied state when one does throw.
+--  * Blizzard renames nameplate frame keys between expansions, so aura
+--    cooldowns are found by walking down from the nameplate rather than by
+--    looking for UnitFrame.BuffFrame and friends.
+--  * Since 12.0 much of the aura data is a "secret value": addon code may hold
+--    it but not read, compare or even type() it, and trying throws. So no value
+--    that came out of a Blizzard frame is ever compared outside the pcall that
+--    produced it, and nothing is left half-applied when one does throw.
+--  * A new aura icon can appear with no event we are able to see, so the walk
+--    has to be repeatable. It is written to allocate nothing, because a walk
+--    that runs several times a second and allocates is how an addon this small
+--    ends up at the top of the memory list.
 
 local ADDON_NAME, ns = ...
 
 local UnitIsUnit, UnitIsFriend = UnitIsUnit, UnitIsFriend
 local GetNamePlates = C_NamePlate and C_NamePlate.GetNamePlates
 local GetNamePlateForUnit = C_NamePlate and C_NamePlate.GetNamePlateForUnit
-local ipairs, pairs, type, pcall, tostring = ipairs, pairs, type, pcall, tostring
+local ipairs, pairs, type, pcall, select = ipairs, pairs, type, pcall, select
+local tostring = tostring
 local strsub, strmatch, strlower, strfind = string.sub, string.match, string.lower, string.find
 
 ns.ADDON_NAME = ADDON_NAME
@@ -33,26 +38,27 @@ ns.defaults = {
 	hideSwipe = false,         -- optionally hide the dark cooldown swipe as well
 }
 
--- cooldowns we know belong to a nameplate: cooldown -> nameplate frame
+-- cooldowns we have classified: cooldown -> nameplate frame, or false
 local tracked = setmetatable({}, { __mode = "k" })
 -- nameplate frame -> set of its cooldowns
 local plateCooldowns = setmetatable({}, { __mode = "k" })
 -- cooldown -> the aura icon it sits on, learned on the way down
 local iconOf = setmetatable({}, { __mode = "k" })
--- nameplate frame -> the frames new aura icons appear in
-local plateContainers = setmetatable({}, { __mode = "k" })
 -- font strings we hid ourselves: region -> { alpha, shown }
 local hiddenText = setmetatable({}, { __mode = "k" })
 
 local applying = false -- re-entrancy guard for our own widget calls
-local EMPTY = {}
+local dirty = false    -- a cooldown we have never seen turned up somewhere
 
 -- ---------------------------------------------------------------------------
--- Talking to frames without dying
+-- Talking to frames without dying, and without allocating
 --
--- Nameplates can hold forbidden frames, and aura values can be secret. Either
--- one throws when touched, so everything that reaches into a Blizzard frame
--- goes through here.
+-- Every comparison of a value that came out of a Blizzard frame happens inside
+-- the pcall'd helper, never on the value it hands back: a secret value may be
+-- held but not read, and type() of a secret is itself secret.
+--
+-- The list helpers fill a scratch table owned by the caller's depth instead of
+-- building a new one, so a walk of every nameplate costs no garbage at all.
 -- ---------------------------------------------------------------------------
 
 local errorLog = {}
@@ -69,7 +75,6 @@ local function Note(err)
 	end
 end
 
--- pcall with the error remembered for /nnn debug
 local function Try(fn, a, b, c)
 	local ok, err = pcall(fn, a, b, c)
 	if not ok then Note(err) end
@@ -77,15 +82,66 @@ local function Try(fn, a, b, c)
 end
 ns.Try = Try
 
--- Every comparison of a value that came out of a Blizzard frame happens inside
--- the pcall'd helper, never on the value it hands back. A secret value may be
--- held but not read, compared or tested, and type() of a secret is itself
--- secret, so touching one outside the pcall throws.
+local scratch = {}
+local function Scratch(slot)
+	local list = scratch[slot]
+	if not list then
+		list = {}
+		scratch[slot] = list
+	end
+	return list
+end
+
+-- Entries past the returned count are stale, and never read. They only ever
+-- hold frames, which live for the whole session anyway.
+local function _gather(list, ...)
+	local count = select("#", ...)
+	for i = 1, count do
+		list[i] = (select(i, ...))
+	end
+	return count
+end
+
+local function _childrenInto(frame, list) return _gather(list, frame:GetChildren()) end
+local function ChildrenInto(frame, list)
+	local ok, count = pcall(_childrenInto, frame, list)
+	return ok and count or 0
+end
+
+local function _regionsInto(frame, list) return _gather(list, frame:GetRegions()) end
+local function RegionsInto(frame, list)
+	local ok, count = pcall(_regionsInto, frame, list)
+	return ok and count or 0
+end
+
 local function _forbidden(obj) return (obj.IsForbidden and obj:IsForbidden()) == true end
 local function Forbidden(obj)
 	if not obj then return true end
 	local ok, res = pcall(_forbidden, obj)
 	return (not ok) or res == true
+end
+
+local function _isObjectType(obj, kind) return obj:GetObjectType() == kind end
+local function IsObjectType(obj, kind)
+	local ok, res = pcall(_isObjectType, obj, kind)
+	return ok and res == true
+end
+
+local function _isShown(obj) return obj:IsShown() == true end
+local function Shown(obj)
+	local ok, shown = pcall(_isShown, obj)
+	return ok and shown == true
+end
+
+local function _alphaOf(region)
+	local alpha = region:GetAlpha()
+	if type(alpha) == "number" then return alpha end
+	return nil
+end
+local function AlphaOf(region)
+	local ok, alpha = pcall(_alphaOf, region)
+	if ok and alpha then return alpha end
+	return 1
 end
 
 local function _isTrue(value) return (value and true) or false end
@@ -107,41 +163,6 @@ local function Str(value)
 	return "<secret>"
 end
 ns.Str = Str
-
-local function _children(frame) return { frame:GetChildren() } end
-local function Children(frame)
-	local ok, list = pcall(_children, frame)
-	return ok and list or EMPTY
-end
-
-local function _regions(frame) return { frame:GetRegions() } end
-local function Regions(frame)
-	local ok, list = pcall(_regions, frame)
-	return ok and list or EMPTY
-end
-
-local function _isShown(obj) return obj:IsShown() == true end
-local function Shown(obj)
-	local ok, shown = pcall(_isShown, obj)
-	return ok and shown == true
-end
-
-local function _alphaOf(region)
-	local alpha = region:GetAlpha()
-	if type(alpha) == "number" then return alpha end
-	return nil
-end
-local function AlphaOf(region)
-	local ok, alpha = pcall(_alphaOf, region)
-	if ok and alpha then return alpha end
-	return 1
-end
-
-local function _isObjectType(obj, kind) return obj:GetObjectType() == kind end
-local function IsObjectType(obj, kind)
-	local ok, res = pcall(_isObjectType, obj, kind)
-	return ok and res == true
-end
 
 -- ---------------------------------------------------------------------------
 -- Which nameplate does a cooldown belong to?
@@ -177,24 +198,10 @@ local function Track(cd, plate)
 	tracked[cd] = plate
 	local set = plateCooldowns[plate]
 	if not set then
-		set = {}
+		set = setmetatable({}, { __mode = "k" })
 		plateCooldowns[plate] = set
 	end
 	set[cd] = true
-end
-
-local function PlateOf(cd)
-	local plate = tracked[cd]
-	if plate ~= nil then
-		return plate or nil
-	end
-	plate = FindNamePlate(cd)
-	if plate then
-		Track(cd, plate)
-	else
-		tracked[cd] = false -- ordinary cooldown, never look at it again
-	end
-	return plate
 end
 
 local function _unitOf(plate)
@@ -231,13 +238,10 @@ end
 -- Timer text drawn as a plain font string
 --
 -- SetHideCountdownNumbers only covers the countdown the cooldown widget draws
--- itself. Anything else - Blizzard drawing the duration as its own font string,
--- or a timer addon that ignores noCooldownCount - is a font string on the aura
--- icon or on the cooldown, and gets hidden here instead.
---
--- The text itself is never read: it is secret on modern clients, and reading it
--- is not needed. Which font string is which is decided from the key Blizzard
--- stored it under.
+-- itself. On 12.x the duration is a font string inside the cooldown, and timer
+-- addons that ignore noCooldownCount add their own. The text is never read - it
+-- is secret, and reading it is not needed - so which font string is which is
+-- decided from the key Blizzard stored it under.
 -- ---------------------------------------------------------------------------
 
 local function LooksLikeCount(key)
@@ -246,8 +250,8 @@ local function LooksLikeCount(key)
 		or strfind(key, "charge", 1, true) or strfind(key, "application", 1, true)) ~= nil
 end
 
--- Regions the icon keeps under a stack-count style key, which must stay visible.
-local function _collectCountRegions(icon, skip)
+local skipSet = {}
+local function _collectCountKeys(icon, skip)
 	for key, value in pairs(icon) do
 		if type(key) == "string" and LooksLikeCount(key) then
 			skip[value] = true
@@ -257,10 +261,16 @@ end
 
 local function _hideRegion(region, hide)
 	if hide then
-		if not hiddenText[region] then
-			-- keep only plain values: a secret alpha would make restoring throw
-			hiddenText[region] = { alpha = AlphaOf(region), shown = Shown(region) }
+		if hiddenText[region] then
+			-- already ours: only act if something has shown it again
+			if Shown(region) then
+				region:SetAlpha(0)
+				region:Hide()
+			end
+			return
 		end
+		-- keep only plain values: a secret alpha would make restoring throw
+		hiddenText[region] = { alpha = AlphaOf(region), shown = Shown(region) }
 		-- alpha as well as hiding: an OnUpdate that only calls SetText and
 		-- Show cannot bring the text back.
 		region:SetAlpha(0)
@@ -283,13 +293,18 @@ end
 
 -- Font strings on the cooldown itself, and in any small child frame of it.
 local function SuppressCooldownText(frame, hide, depth)
-	for _, region in ipairs(Regions(frame)) do
+	local regions = Scratch(20 + depth)
+	for i = 1, RegionsInto(frame, regions) do
+		local region = regions[i]
 		if not Forbidden(region) and IsObjectType(region, "FontString") then
 			HideRegion(region, hide)
 		end
 	end
+
 	if depth < 2 then
-		for _, child in ipairs(Children(frame)) do
+		local children = Scratch(30 + depth)
+		for i = 1, ChildrenInto(frame, children) do
+			local child = children[i]
 			if not Forbidden(child) then
 				SuppressCooldownText(child, hide, depth + 1)
 			end
@@ -300,20 +315,27 @@ end
 -- Font strings on the aura icon that owns the cooldown - the duration text -
 -- while leaving the stack count alone.
 local function SuppressIconText(icon, hide)
-	local skip = {}
-	pcall(_collectCountRegions, icon, skip)
+	for key in pairs(skipSet) do skipSet[key] = nil end
+	pcall(_collectCountKeys, icon, skipSet)
 
-	for _, region in ipairs(Regions(icon)) do
-		if not skip[region] and not Forbidden(region) and IsObjectType(region, "FontString") then
+	local regions = Scratch(40)
+	for i = 1, RegionsInto(icon, regions) do
+		local region = regions[i]
+		if not skipSet[region] and not Forbidden(region) and IsObjectType(region, "FontString") then
 			HideRegion(region, hide)
 		end
 	end
 
 	-- Blizzard parks the stack count in its own child frame (CountFrame.Count),
 	-- so a child frame stored under a count-ish key is skipped whole.
-	for _, child in ipairs(Children(icon)) do
-		if not skip[child] and not Forbidden(child) then
-			for _, region in ipairs(Regions(child)) do
+	local children = Scratch(41)
+	local childCount = ChildrenInto(icon, children)
+	for i = 1, childCount do
+		local child = children[i]
+		if not skipSet[child] and not Forbidden(child) then
+			local childRegions = Scratch(42)
+			for j = 1, RegionsInto(child, childRegions) do
+				local region = childRegions[j]
 				if IsObjectType(region, "FontString") then
 					HideRegion(region, hide)
 				end
@@ -326,7 +348,7 @@ end
 -- Applying
 -- ---------------------------------------------------------------------------
 
--- GetParent is forbidden on 12.x nameplate aura cooldowns, so the icon is
+-- GetParent is refused on some 12.x nameplate aura cooldowns, so the icon is
 -- normally learned on the way down and only asked for as a last resort - once,
 -- so a refusal is not repeated on every update.
 local function IconOf(cd)
@@ -367,8 +389,8 @@ local function DoApply(cd, hide)
 		Try(_restart, cd)
 	end
 
-	if db.forceHideText or cd.nnnTextHidden then
-		local hideText = (hide and db.forceHideText) or false
+	local hideText = (hide and db.forceHideText) or false
+	if hideText or cd.nnnTextHidden then
 		Try(SuppressCooldownText, cd, hideText, 0)
 		local icon = IconOf(cd)
 		if icon and not Forbidden(icon) then
@@ -404,70 +426,53 @@ local function ApplyToPlate(plate, unit)
 	end
 end
 
--- Walking down from the nameplate is the only discovery that works for aura
--- cooldowns whose parent we are not allowed to ask about. On the way it notes
--- the icon each cooldown sits on, and the frame that icon lives in, so new
--- auras can be picked up later without walking the whole plate again.
-local function Discover(plate, frame, depth, parent)
-	for _, child in ipairs(Children(frame)) do
+-- ---------------------------------------------------------------------------
+-- Discovery
+--
+-- Walking down from the nameplate is the only thing that finds aura cooldowns
+-- whose parent we are not allowed to ask about. On the way it notes the icon
+-- each cooldown sits on, so GetParent is never needed afterwards.
+-- ---------------------------------------------------------------------------
+
+local function Discover(plate, frame, depth)
+	local children = Scratch(depth)
+	for i = 1, ChildrenInto(frame, children) do
+		local child = children[i]
 		if not Forbidden(child) then
 			if IsObjectType(child, "Cooldown") then
 				if tracked[child] ~= plate then
 					Track(child, plate)
 				end
 				iconOf[child] = frame
-				if parent then
-					local containers = plateContainers[plate]
-					if not containers then
-						containers = setmetatable({}, { __mode = "k" })
-						plateContainers[plate] = containers
-					end
-					containers[parent] = true
-				end
 			elseif depth < 6 then
-				Discover(plate, child, depth + 1, frame)
+				Discover(plate, child, depth + 1)
 			end
 		end
 	end
 end
 
 local function ScanPlate(plate, unit)
-	Try(Discover, plate, plate, 0, nil)
+	Try(Discover, plate, plate, 0)
 	ApplyToPlate(plate, unit)
 end
 
--- The cheap version: only the frames aura icons are already known to appear
--- in. Knowing one container is no proof we know them all - a plate carries a
--- permanent loss-of-control frame that is found on the first walk, while the
--- debuff list fills up later - so this never replaces the full walk, it only
--- fills the gaps between them.
-local function ReScan(plate, unit, full)
-	local containers = plateContainers[plate]
-	if full or not containers or not next(containers) then
-		return ScanPlate(plate, unit)
+local function ScanAll()
+	if not GetNamePlates then return end
+	local ok, plates = pcall(GetNamePlates)
+	if not ok or not plates then return end
+	for _, plate in ipairs(plates) do
+		ScanPlate(plate)
 	end
-	for container in pairs(containers) do
-		Try(Discover, plate, container, 3, nil)
-	end
-	ApplyToPlate(plate, unit)
 end
 
 function ns.RefreshAll()
-	if GetNamePlates then
-		local ok, plates = pcall(GetNamePlates)
-		if ok and plates then
-			for _, plate in ipairs(plates) do
-				ScanPlate(plate)
-			end
-		end
-	end
+	ScanAll()
 	-- also cover plates that are no longer shown but keep their cooldowns
 	for cd, plate in pairs(tracked) do
 		if plate then
 			ApplyToCooldown(cd, ShouldHide(UnitOf(plate)))
 		end
 	end
-
 	if ns.UpdateSweep then ns.UpdateSweep() end
 end
 
@@ -475,9 +480,29 @@ end
 -- Hooks
 -- ---------------------------------------------------------------------------
 
--- Every cooldown in the game runs through these two widget methods. The very
--- first call per cooldown decides whether it lives on a nameplate, after that
--- it is a single table lookup, so ordinary cooldowns cost next to nothing.
+-- Every cooldown in the game runs through these two widget methods. The first
+-- call per cooldown decides whether it lives on a nameplate; after that it is a
+-- single table lookup, so ordinary cooldowns cost next to nothing.
+--
+-- A cooldown we cannot trace up to its nameplate is not written off silently:
+-- it means something new appeared somewhere, and the walk gets to look for it
+-- on the very next frame.
+local function Classify(cd)
+	local plate = tracked[cd]
+	if plate ~= nil then
+		return plate or nil
+	end
+
+	plate = FindNamePlate(cd)
+	if plate then
+		Track(cd, plate)
+	else
+		tracked[cd] = false
+		dirty = true
+	end
+	return plate
+end
+
 local function HookCooldownWidgets()
 	local probe = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
 	local meta = getmetatable(probe)
@@ -489,7 +514,7 @@ local function HookCooldownWidgets()
 
 	hooksecurefunc(index, "SetCooldown", function(self)
 		if applying then return end
-		local plate = PlateOf(self)
+		local plate = Classify(self)
 		if plate then
 			ApplyToCooldown(self, ShouldHide(UnitOf(plate)))
 		end
@@ -504,7 +529,7 @@ local function HookCooldownWidgets()
 			-- argument can only be inspected through IsTrue. When it cannot be
 			-- read at all, re-apply: asking for hidden twice costs nothing.
 			if IsTrue(value) == true then return end
-			local plate = PlateOf(self)
+			local plate = Classify(self)
 			if plate and ShouldHide(UnitOf(plate)) then
 				self.nnnHidden = nil
 				ApplyToCooldown(self, true)
@@ -536,10 +561,7 @@ frame:RegisterEvent("UNIT_AURA")
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "UNIT_AURA" then
 		if ns.db and IsNameplateUnit(arg1) then
-			local plate = GetNamePlateForUnit and GetNamePlateForUnit(arg1)
-			if plate then
-				ReScan(plate, arg1)
-			end
+			dirty = true
 		end
 
 	elseif event == "NAME_PLATE_UNIT_ADDED" then
@@ -547,6 +569,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		if plate then
 			ScanPlate(plate, arg1)
 		end
+		dirty = true
 
 	elseif event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		NoNameplateNumbersDB = NoNameplateNumbersDB or {}
@@ -567,34 +590,32 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 end)
 
 -- ---------------------------------------------------------------------------
--- Safety net
+-- Keeping up with new aura icons
 --
--- An aura icon can appear without any event we are able to see, so the frames
--- aura icons are known to live in get re-checked a few times a second. That is
--- a couple of table lookups per nameplate, not a walk of the whole plate, and
--- the whole thing is switched off while the addon is not hiding anything.
+-- An icon can appear with no event we can see, so there is a sweep - but it is
+-- driven rather than polled. Anything that means "something new turned up"
+-- (an aura change, a nameplate appearing, a cooldown we have never classified
+-- starting anywhere in the UI) raises a flag, and the walk runs on the very
+-- next frame instead of up to a second later. The timed sweep is only a
+-- backstop for the case where none of those reach us, and the whole thing is
+-- unhooked while the addon is not hiding anything.
 -- ---------------------------------------------------------------------------
 
-local SWEEP_INTERVAL = 0.25
-local FULL_EVERY = 4 -- ticks, so every plate is walked in full once a second
-
-local sinceSweep, tick = 0, 0
+local BACKSTOP = 0.5
+local since = 0
 
 local function Sweep(self, elapsed)
-	sinceSweep = sinceSweep + elapsed
-	if sinceSweep < SWEEP_INTERVAL then return end
-	sinceSweep = 0
-
-	tick = tick + 1
-	local full = (tick % FULL_EVERY) == 0
-
-	if not GetNamePlates then return end
-	local ok, plates = pcall(GetNamePlates)
-	if not ok or not plates then return end
-
-	for _, plate in ipairs(plates) do
-		ReScan(plate, nil, full)
+	if dirty then
+		dirty = false
+		since = 0
+		ScanAll()
+		return
 	end
+
+	since = since + elapsed
+	if since < BACKSTOP then return end
+	since = 0
+	ScanAll()
 end
 
 function ns.UpdateSweep()
@@ -614,7 +635,7 @@ local function Say(text)
 end
 ns.Say = Say
 
--- Frame names are secret too on 12.x nameplate aura frames, so the check for a
+-- Frame names are secret on 12.x nameplate aura frames, so the check for a
 -- usable name happens inside the pcall.
 local function _usableName(name)
 	if type(name) == "string" and name ~= "" then return name end
@@ -638,8 +659,6 @@ local function NameOf(obj)
 	return (secret or not plainOk) and "<secret name>" or "<unnamed>"
 end
 
--- Aura text is secret on modern clients: it can be held but not read or
--- compared. Report what we can without ever looking at the value.
 local function _describeText(value)
 	if value == nil then return "<none>" end
 	if value == "" then return "<empty>" end
@@ -654,9 +673,23 @@ local function TextOf(region)
 	return text
 end
 
--- Everything the walk finds under a nameplate, for the report.
+local function _runningFor(cd)
+	local _, duration = cd:GetCooldownTimes()
+	if duration and duration > 0 then
+		return ("%.1fs"):format(duration / 1000)
+	end
+	return "no"
+end
+
+local function RunningFor(cd)
+	local ok, text = pcall(_runningFor, cd)
+	return ok and text or "<secret>"
+end
+
+-- The report walks with its own tables: it runs once, by hand, and clarity
+-- matters more than garbage there.
 local function Survey(frame, depth, found)
-	for _, region in ipairs(Regions(frame)) do
+	for _, region in ipairs({ frame:GetRegions() }) do
 		if Forbidden(region) then
 			found.forbidden = found.forbidden + 1
 		elseif IsObjectType(region, "FontString") then
@@ -669,7 +702,7 @@ local function Survey(frame, depth, found)
 		end
 	end
 
-	for _, child in ipairs(Children(frame)) do
+	for _, child in ipairs({ frame:GetChildren() }) do
 		if Forbidden(child) then
 			found.forbidden = found.forbidden + 1
 		else
@@ -682,19 +715,6 @@ local function Survey(frame, depth, found)
 		end
 	end
 	return found
-end
-
-local function _runningFor(cd)
-	local _, duration = cd:GetCooldownTimes()
-	if duration and duration > 0 then
-		return ("%.1fs"):format(duration / 1000)
-	end
-	return "no"
-end
-
-local function RunningFor(cd)
-	local ok, text = pcall(_runningFor, cd)
-	return ok and text or "<secret>"
 end
 
 function ns.Debug()
@@ -735,17 +755,21 @@ function ns.Debug()
 	Say(("found on that plate: %d cooldowns, %d font strings, %d forbidden frames skipped")
 		:format(#found.cooldowns, #found.texts, found.forbidden))
 
-	local trackedHere, trackedAll, containers = 0, 0, 0
+	local trackedHere, trackedAll = 0, 0
 	for cd, owner in pairs(tracked) do
 		if owner then
 			trackedAll = trackedAll + 1
 			if owner == plate then trackedHere = trackedHere + 1 end
 		end
 	end
-	for _ in pairs(plateContainers[plate] or {}) do containers = containers + 1 end
-	Say(("sweep: %s, tracked here: %d, tracked everywhere: %d, known aura containers here: %d")
-		:format(frame:GetScript("OnUpdate") and "running" or "OFF",
-			trackedHere, trackedAll, containers))
+	local memory = 0
+	if UpdateAddOnMemoryUsage and GetAddOnMemoryUsage then
+		pcall(UpdateAddOnMemoryUsage)
+		local memOk, used = pcall(GetAddOnMemoryUsage, ADDON_NAME)
+		if memOk and type(used) == "number" then memory = used end
+	end
+	Say(("sweep: %s, tracked here: %d, tracked everywhere: %d, memory: %.0f KB"):format(
+		frame:GetScript("OnUpdate") and "running" or "OFF", trackedHere, trackedAll, memory))
 
 	for i, cd in ipairs(found.cooldowns) do
 		if i > 6 then break end

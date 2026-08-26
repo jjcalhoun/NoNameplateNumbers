@@ -347,6 +347,7 @@ check("12.1 shape: forbidden GetParent did not stop anything",
 local icon3, cd3 = AddRealDebuff()
 check("third debuff starts visible", cd3.durationText.shown == true)
 fire("UNIT_AURA", "nameplate9")
+eventFrame.scripts.OnUpdate(eventFrame, 0.016)  -- events coalesce to the next frame
 check("third debuff hidden after UNIT_AURA", cd3.durationText.shown == false
   and cd3.hideNumbers == true)
 
@@ -398,6 +399,30 @@ local trapCD = AddTrapDebuff()
 for _ = 1, 8 do eventFrame.scripts.OnUpdate(eventFrame, 0.3) end
 check("debuff in a container found later is still hidden",
   trapCD.durationText.shown == false and trapCD.hideNumbers == true)
+
+-- A brand new debuff must be hidden on the very next frame, not up to a
+-- second later: SetCooldown on a cooldown we have never classified is itself
+-- the signal that something new turned up.
+local flashCD = AddTrapDebuff()
+check("new debuff starts visible", flashCD.durationText.shown == true)
+eventFrame.scripts.OnUpdate(eventFrame, 0.016)   -- one frame, not a sweep interval
+check("new debuff hidden on the next frame",
+  flashCD.durationText.shown == false and flashCD.hideNumbers == true)
+
+-- An aura change reported by the game gets the same one frame response.
+local eventCD = AddTrapDebuff()
+fire("UNIT_AURA", "nameplate10")
+eventFrame.scripts.OnUpdate(eventFrame, 0.016)
+check("debuff hidden one frame after UNIT_AURA", eventCD.durationText.shown == false)
+
+-- Idling must not allocate: this is what puts a tiny addon at the top of the
+-- memory list.
+collectgarbage("collect")
+local beforeKB = collectgarbage("count")
+for _ = 1, 300 do eventFrame.scripts.OnUpdate(eventFrame, 0.6) end
+collectgarbage("collect")
+local grewKB = collectgarbage("count") - beforeKB
+check(("300 full sweeps allocate almost nothing (%.1f KB)"):format(grewKB), grewKB < 16)
 
 -- diagnostics must not blow up
 UnitIsUnit = function(a, b) return (plates[a] and plates[a].isPlayer and b == "player") or false end

@@ -83,17 +83,22 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   came out of a Blizzard frame happens *inside* a `pcall`, never on the value
   it hands back. A secret value can never leave the addon half-applied or
   switched off for the rest of the session.
-* That hook cannot see every aura cooldown: on 12.x `GetParent` is forbidden on
+* That hook cannot see every aura cooldown: on 12.x `GetParent` is refused on
   the ones in `AurasFrame.DebuffListFrame`, so there is no way up from the
-  cooldown to the nameplate. Those are found by walking *down* from the
-  nameplate instead — on `NAME_PLATE_UNIT_ADDED`, on `UNIT_AURA`, and on a
-  0.25s sweep for icons that appear with no event we can see. The walk
-  remembers the icon each cooldown sits on and the frames new icons appear in,
-  so most sweep ticks look at a couple of frames per nameplate. Knowing one
-  container is not proof of knowing them all, though — a plate carries a
-  permanent loss-of-control frame that the first walk finds while the debuff
-  list is still empty — so a full walk of every plate still runs once a second.
-  The sweep is unhooked entirely while the addon is not hiding anything.
+  cooldown to its nameplate. Those are found by walking *down* from the
+  nameplate instead, and the walk records the icon each cooldown sits on so
+  `GetParent` is never needed again.
+* The walk is **driven, not polled**. Anything meaning "something new turned
+  up" — a nameplate appearing, an aura change, or a cooldown the addon has
+  never classified starting anywhere in the UI — raises a flag, and the walk
+  runs on the very next frame. That last one matters: a brand new aura icon
+  announces itself simply by starting its cooldown. A timed sweep every 0.5s
+  remains as a backstop for the case where none of those reach us, and the
+  whole thing is unhooked while the addon is not hiding anything.
+* The walk **allocates nothing**. `{ frame:GetChildren() }` builds a table per
+  frame per walk, which at a few walks a second is what puts a tiny addon at
+  the top of the memory list, so the children and regions of a frame are read
+  into a scratch table owned by the walk's depth instead.
 * `SetHideCountdownNumbers` is hooked too, so if Blizzard turns the numbers
   back on for a nameplate aura, the addon puts its answer back.
 * No `CVar` is changed, so your cooldown-number settings everywhere else in the
@@ -126,8 +131,12 @@ read the output:
 
 `tests/mock.lua` runs the addon against a mock of the WoW API — frames,
 cooldowns, regions, events, forbidden frames and secret values — with nameplate
-shapes taken from real `/nnn debug` dumps. Run it from the addon folder with
-any Lua interpreter: `lua tests/mock.lua`. It is not loaded by the game.
+shapes taken from real `/nnn debug` dumps. It covers the awkward cases this
+addon has actually hit in the wild: a permanent loss-of-control frame that
+hides a debuff list filling up later, a debuff applied after its nameplate
+appeared, values the client refuses to hand over, and a check that 300 sweeps
+in a row allocate nothing. Run it from the addon folder with any Lua
+interpreter: `lua tests/mock.lua`. It is not loaded by the game.
 
 ## Notes
 
