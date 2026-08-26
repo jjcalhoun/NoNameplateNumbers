@@ -74,6 +74,12 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   looks like a stack count are left alone.
 * Nameplates can contain forbidden frames, and touching one throws, so every
   walk skips them instead of dying halfway through.
+* On 12.0 and later a lot of aura data is a **secret value**: an addon may hold
+  it but not read or compare it, and trying throws. Nothing here reads aura
+  text or duration to do its job — which font string is the duration and which
+  is the stack count is decided from the key Blizzard stored it under — and
+  every call into a Blizzard frame is wrapped, so a secret value can never
+  leave the addon half-applied or switched off for the rest of the session.
 * `NAME_PLATE_UNIT_ADDED` walks the plate once to pick up auras that were
   already running (right after login, for instance) and to re-decide
   enemy/friendly/personal when a nameplate is recycled onto a new unit.
@@ -101,6 +107,9 @@ read the output:
   the end of the line says exactly who owns it; that is the line to report.
 * **"scan failed: ..."** — the walk hit something it could not read; report the
   message.
+* **"errors seen so far:"** — anything the addon tried and the client refused.
+  These are survived rather than fatal, but they are worth reporting: they say
+  exactly which call the client is blocking.
 
 ## Notes
 
