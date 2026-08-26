@@ -90,15 +90,22 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   `GetParent` is never needed again.
 * The walk is **driven, not polled**. Anything meaning "something new turned
   up" — a nameplate appearing, an aura change, or a cooldown the addon has
-  never classified starting anywhere in the UI — raises a flag, and the walk
-  runs on the very next frame. That last one matters: a brand new aura icon
-  announces itself simply by starting its cooldown. A timed sweep every 0.5s
-  remains as a backstop for the case where none of those reach us, and the
-  whole thing is unhooked while the addon is not hiding anything.
-* The walk **allocates nothing**. `{ frame:GetChildren() }` builds a table per
-  frame per walk, which at a few walks a second is what puts a tiny addon at
-  the top of the memory list, so the children and regions of a frame are read
-  into a scratch table owned by the walk's depth instead.
+  never classified starting anywhere in the UI — flags *that nameplate*, and
+  the walk visits it within 50ms. That last signal matters: a brand new aura
+  icon announces itself simply by starting its cooldown, even though it cannot
+  be traced back up to its nameplate. A blind sweep of everything runs only
+  once every 5 seconds as insurance, and the whole thing is unhooked while the
+  addon is not hiding anything.
+* The addon is built to **allocate as little as possible**, because in this
+  game every allocation is charged to whoever caused it and the figure people
+  see is what has piled up since the last collection. So: the children and
+  regions of a frame are read into a scratch table owned by the walk's depth
+  rather than a fresh `{ frame:GetChildren() }` per frame; the list of visible
+  nameplates is kept as events report it rather than by calling
+  `C_NamePlate.GetNamePlates`, which builds a new table on every call; nothing
+  reads a value the client will refuse, because a refusal builds an error
+  string every single time; and a region that does refuse is left alone
+  afterwards rather than asked again on every pass.
 * `SetHideCountdownNumbers` is hooked too, so if Blizzard turns the numbers
   back on for a nameplate aura, the addon puts its answer back.
 * No `CVar` is changed, so your cooldown-number settings everywhere else in the

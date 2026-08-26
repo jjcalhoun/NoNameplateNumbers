@@ -46,9 +46,14 @@ local plateCooldowns = setmetatable({}, { __mode = "k" })
 local iconOf = setmetatable({}, { __mode = "k" })
 -- font strings we hid ourselves: region -> { alpha, shown }
 local hiddenText = setmetatable({}, { __mode = "k" })
+-- regions the client refuses to let us touch, so we stop asking
+local refused = setmetatable({}, { __mode = "k" })
+
+local WEAK_KEYS = { __mode = "k" }
 
 local applying = false -- re-entrancy guard for our own widget calls
-local dirty = false    -- a cooldown we have never seen turned up somewhere
+local dirty = false    -- something turned up that we should go and look for
+local dirtyAll = false -- ...and we do not know which nameplate it was on
 
 -- ---------------------------------------------------------------------------
 -- Talking to frames without dying, and without allocating
@@ -65,18 +70,17 @@ local errorLog = {}
 ns.errorLog = errorLog
 
 local function Note(err)
+	if #errorLog >= 5 then return end
 	local ok, text = pcall(tostring, err)
 	if not ok then text = "<unreadable error>" end
 	for _, seen in ipairs(errorLog) do
 		if seen == text then return end
 	end
-	if #errorLog < 5 then
-		errorLog[#errorLog + 1] = text
-	end
+	errorLog[#errorLog + 1] = text
 end
 
-local function Try(fn, a, b, c)
-	local ok, err = pcall(fn, a, b, c)
+local function Try(fn, a, b, c, d)
+	local ok, err = pcall(fn, a, b, c, d)
 	if not ok then Note(err) end
 	return ok
 end
@@ -144,14 +148,6 @@ local function AlphaOf(region)
 	return 1
 end
 
-local function _isTrue(value) return (value and true) or false end
--- true, false, or nil when the value cannot be read at all
-local function IsTrue(value)
-	local ok, res = pcall(_isTrue, value)
-	if not ok then return nil end
-	return res
-end
-
 local function _str(value)
 	local text = tostring(value)
 	if type(text) == "string" then return text end
@@ -198,7 +194,7 @@ local function Track(cd, plate)
 	tracked[cd] = plate
 	local set = plateCooldowns[plate]
 	if not set then
-		set = setmetatable({}, { __mode = "k" })
+		set = setmetatable({}, WEAK_KEYS)
 		plateCooldowns[plate] = set
 	end
 	set[cd] = true
@@ -261,18 +257,14 @@ end
 
 local function _hideRegion(region, hide)
 	if hide then
-		if hiddenText[region] then
-			-- already ours: only act if something has shown it again
-			if Shown(region) then
-				region:SetAlpha(0)
-				region:Hide()
-			end
-			return
+		if not hiddenText[region] then
+			-- keep only plain values: a secret alpha would make restoring throw
+			hiddenText[region] = { alpha = AlphaOf(region), shown = Shown(region) }
 		end
-		-- keep only plain values: a secret alpha would make restoring throw
-		hiddenText[region] = { alpha = AlphaOf(region), shown = Shown(region) }
-		-- alpha as well as hiding: an OnUpdate that only calls SetText and
-		-- Show cannot bring the text back.
+		-- No "is it already hidden?" question first: asking is a call that can
+		-- throw, and throwing builds a string, while hiding something already
+		-- hidden costs nothing. Alpha as well as Hide, so an OnUpdate that only
+		-- calls SetText and Show cannot bring the text back.
 		region:SetAlpha(0)
 		region:Hide()
 	else
@@ -285,9 +277,14 @@ local function _hideRegion(region, hide)
 	end
 end
 
+-- A region that throws will throw every time, and every throw builds an error
+-- string. Ask once, then leave it alone until the settings change.
 local function HideRegion(region, hide)
+	if refused[region] then return end
 	if hide or hiddenText[region] then
-		Try(_hideRegion, region, hide)
+		if not Try(_hideRegion, region, hide) then
+			refused[region] = true
+		end
 	end
 end
 
@@ -360,6 +357,18 @@ local function IconOf(cd)
 	return iconOf[cd] or nil
 end
 
+-- Blizzard can add its timer font string after the cooldown has already
+-- started, so this cannot be a one-shot. It is cheap to repeat: a region we
+-- have already hidden costs one IsShown call and nothing else.
+local function ApplyText(cd, hideText)
+	Try(SuppressCooldownText, cd, hideText, 0)
+	local icon = IconOf(cd)
+	if icon and not Forbidden(icon) then
+		Try(SuppressIconText, icon, hideText)
+	end
+	cd.nnnTextHidden = hideText or nil
+end
+
 local function _setHideNumbers(cd, hide) cd:SetHideCountdownNumbers(hide) end
 local function _setDrawSwipe(cd, draw) cd:SetDrawSwipe(draw) end
 
@@ -389,15 +398,7 @@ local function DoApply(cd, hide)
 		Try(_restart, cd)
 	end
 
-	local hideText = (hide and db.forceHideText) or false
-	if hideText or cd.nnnTextHidden then
-		Try(SuppressCooldownText, cd, hideText, 0)
-		local icon = IconOf(cd)
-		if icon and not Forbidden(icon) then
-			Try(SuppressIconText, icon, hideText)
-		end
-		cd.nnnTextHidden = hideText or nil
-	end
+	ApplyText(cd, (hide and db.forceHideText) or false)
 
 	local drawSwipe = not (hide and db.hideSwipe)
 	if cd.nnnSwipe ~= drawSwipe then
@@ -417,10 +418,9 @@ local function ApplyToCooldown(cd, hide)
 	if not ok then Note(err) end
 end
 
-local function ApplyToPlate(plate, unit)
+local function ApplyToPlate(plate, hide)
 	local set = plateCooldowns[plate]
 	if not set then return end
-	local hide = ShouldHide(unit or UnitOf(plate))
 	for cd in pairs(set) do
 		ApplyToCooldown(cd, hide)
 	end
@@ -434,39 +434,87 @@ end
 -- each cooldown sits on, so GetParent is never needed afterwards.
 -- ---------------------------------------------------------------------------
 
-local function Discover(plate, frame, depth)
+-- Cooldowns are dealt with as they are found, so a sweep that finds nothing
+-- new does nothing at all.
+local function Discover(plate, frame, depth, hide)
 	local children = Scratch(depth)
 	for i = 1, ChildrenInto(frame, children) do
 		local child = children[i]
 		if not Forbidden(child) then
 			if IsObjectType(child, "Cooldown") then
+				iconOf[child] = frame
 				if tracked[child] ~= plate then
 					Track(child, plate)
+					ApplyToCooldown(child, hide)
 				end
-				iconOf[child] = frame
 			elseif depth < 6 then
-				Discover(plate, child, depth + 1)
+				Discover(plate, child, depth + 1, hide)
 			end
 		end
 	end
 end
 
-local function ScanPlate(plate, unit)
-	Try(Discover, plate, plate, 0)
-	ApplyToPlate(plate, unit)
+local function RecheckText(plate, hide)
+	local set = plateCooldowns[plate]
+	local db = ns.db
+	if not set or not db then return end
+	local hideText = (hide and db.forceHideText) or false
+	for cd in pairs(set) do
+		ApplyText(cd, hideText)
+	end
 end
 
-local function ScanAll()
-	if not GetNamePlates then return end
-	local ok, plates = pcall(GetNamePlates)
-	if not ok or not plates then return end
-	for _, plate in ipairs(plates) do
-		ScanPlate(plate)
+-- applyAll is for when the answer itself may have changed - a nameplate taken
+-- over by a new unit, or a settings change - rather than just the frames.
+local function ScanPlate(plate, unit, applyAll)
+	local hide = ShouldHide(unit or UnitOf(plate))
+	Try(Discover, plate, plate, 0, hide)
+	if applyAll then
+		ApplyToPlate(plate, hide)
+	else
+		RecheckText(plate, hide)
+	end
+end
+
+-- Our own list of what is on screen. C_NamePlate.GetNamePlates builds a fresh
+-- table on every call, which is not something to do a few times a second.
+local activePlates = setmetatable({}, WEAK_KEYS)
+-- nameplates something has just happened on
+local dirtyPlates = setmetatable({}, WEAK_KEYS)
+
+local function MarkDirty(plate)
+	if plate then
+		dirtyPlates[plate] = true
+	else
+		dirtyAll = true
+	end
+	dirty = true
+end
+
+local function ScanAll(applyAll)
+	for plate, unit in pairs(activePlates) do
+		ScanPlate(plate, unit, applyAll)
 	end
 end
 
 function ns.RefreshAll()
-	ScanAll()
+	-- a settings change is worth re-trying anything that refused us before
+	for region in pairs(refused) do
+		refused[region] = nil
+	end
+
+	-- one allocating call, at login and when settings change
+	if GetNamePlates then
+		local ok, plates = pcall(GetNamePlates)
+		if ok and plates then
+			for _, plate in ipairs(plates) do
+				if activePlates[plate] == nil then
+					activePlates[plate] = UnitOf(plate) or false
+				end
+			end
+		end
+	end
+	ScanAll(true)
 	-- also cover plates that are no longer shown but keep their cooldowns
 	for cd, plate in pairs(tracked) do
 		if plate then
@@ -497,8 +545,11 @@ local function Classify(cd)
 	if plate then
 		Track(cd, plate)
 	else
+		-- Something new started somewhere and we could not trace it back to a
+		-- nameplate. It may be an aura icon that has just been built, so every
+		-- plate is worth another look - but only this once.
 		tracked[cd] = false
-		dirty = true
+		MarkDirty(nil)
 	end
 	return plate
 end
@@ -516,6 +567,9 @@ local function HookCooldownWidgets()
 		if applying then return end
 		local plate = Classify(self)
 		if plate then
+			-- a cooldown starting is the one moment Blizzard may have put its
+			-- own timer text back, so let the icon be looked at again
+			self.nnnTextHidden = nil
 			ApplyToCooldown(self, ShouldHide(UnitOf(plate)))
 		end
 	end)
@@ -525,10 +579,10 @@ local function HookCooldownWidgets()
 	if type(index.SetHideCountdownNumbers) == "function" then
 		hooksecurefunc(index, "SetHideCountdownNumbers", function(self, value)
 			if applying then return end
-			-- Blizzard passes a secret boolean here for nameplate auras, so the
-			-- argument can only be inspected through IsTrue. When it cannot be
-			-- read at all, re-apply: asking for hidden twice costs nothing.
-			if IsTrue(value) == true then return end
+			-- Blizzard passes a secret boolean here for nameplate auras, and
+			-- every attempt to read one throws - which builds an error string
+			-- each time. The argument is simply never looked at: re-applying
+			-- our own answer is cheaper than finding out we did not need to.
 			local plate = Classify(self)
 			if plate and ShouldHide(UnitOf(plate)) then
 				self.nnnHidden = nil
@@ -556,20 +610,30 @@ local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
+frame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
 frame:RegisterEvent("UNIT_AURA")
 
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "UNIT_AURA" then
+		-- only the nameplate this happened on needs looking at
 		if ns.db and IsNameplateUnit(arg1) then
-			dirty = true
+			MarkDirty(GetNamePlateForUnit and GetNamePlateForUnit(arg1))
 		end
 
 	elseif event == "NAME_PLATE_UNIT_ADDED" then
 		local plate = GetNamePlateForUnit and GetNamePlateForUnit(arg1)
 		if plate then
-			ScanPlate(plate, arg1)
+			activePlates[plate] = arg1
+			-- the unit is new, so the answer may be too
+			ScanPlate(plate, arg1, true)
+			MarkDirty(plate)
 		end
-		dirty = true
+
+	elseif event == "NAME_PLATE_UNIT_REMOVED" then
+		local plate = GetNamePlateForUnit and GetNamePlateForUnit(arg1)
+		if plate then
+			activePlates[plate] = nil
+		end
 
 	elseif event == "ADDON_LOADED" and arg1 == ADDON_NAME then
 		NoNameplateNumbersDB = NoNameplateNumbersDB or {}
@@ -601,21 +665,42 @@ end)
 -- unhooked while the addon is not hiding anything.
 -- ---------------------------------------------------------------------------
 
-local BACKSTOP = 0.5
+local BACKSTOP = 5    -- seconds, when nothing has announced itself
+local MIN_GAP = 0.05  -- seconds, the most often a flag can start a scan
+
 local since = 0
 
 local function Sweep(self, elapsed)
+	since = since + elapsed
+
 	if dirty then
-		dirty = false
+		-- Aura events can arrive many times a second in a fight; one scan per
+		-- 20th of a second is still far faster than anyone can see.
+		if since < MIN_GAP then return end
 		since = 0
-		ScanAll()
+
+		if dirtyAll then
+			ScanAll(false)
+		else
+			-- just the nameplates something happened on
+			for plate in pairs(dirtyPlates) do
+				if activePlates[plate] ~= nil then
+					ScanPlate(plate, activePlates[plate], false)
+				end
+				dirtyPlates[plate] = nil
+			end
+		end
+
+		dirty, dirtyAll = false, false
+		for plate in pairs(dirtyPlates) do
+			dirtyPlates[plate] = nil
+		end
 		return
 	end
 
-	since = since + elapsed
 	if since < BACKSTOP then return end
 	since = 0
-	ScanAll()
+	ScanAll(false)
 end
 
 function ns.UpdateSweep()

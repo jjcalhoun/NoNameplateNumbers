@@ -347,7 +347,7 @@ check("12.1 shape: forbidden GetParent did not stop anything",
 local icon3, cd3 = AddRealDebuff()
 check("third debuff starts visible", cd3.durationText.shown == true)
 fire("UNIT_AURA", "nameplate9")
-eventFrame.scripts.OnUpdate(eventFrame, 0.016)  -- events coalesce to the next frame
+eventFrame.scripts.OnUpdate(eventFrame, 0.05)  -- events coalesce, a few frames
 check("third debuff hidden after UNIT_AURA", cd3.durationText.shown == false
   and cd3.hideNumbers == true)
 
@@ -405,24 +405,49 @@ check("debuff in a container found later is still hidden",
 -- the signal that something new turned up.
 local flashCD = AddTrapDebuff()
 check("new debuff starts visible", flashCD.durationText.shown == true)
-eventFrame.scripts.OnUpdate(eventFrame, 0.016)   -- one frame, not a sweep interval
-check("new debuff hidden on the next frame",
+eventFrame.scripts.OnUpdate(eventFrame, 0.05)   -- a few frames, not a sweep interval
+check("new debuff hidden within a few frames",
   flashCD.durationText.shown == false and flashCD.hideNumbers == true)
 
 -- An aura change reported by the game gets the same one frame response.
 local eventCD = AddTrapDebuff()
 fire("UNIT_AURA", "nameplate10")
-eventFrame.scripts.OnUpdate(eventFrame, 0.016)
-check("debuff hidden one frame after UNIT_AURA", eventCD.durationText.shown == false)
+eventFrame.scripts.OnUpdate(eventFrame, 0.05)
+check("debuff hidden a few frames after UNIT_AURA", eventCD.durationText.shown == false)
 
 -- Idling must not allocate: this is what puts a tiny addon at the top of the
 -- memory list.
+-- Churn, not retained memory: WoW attributes every allocation to the addon
+-- that caused it, and the figure people see is what piled up since the last
+-- collection. So measure with the collector held off.
 collectgarbage("collect")
+collectgarbage("stop")
 local beforeKB = collectgarbage("count")
 for _ = 1, 300 do eventFrame.scripts.OnUpdate(eventFrame, 0.6) end
-collectgarbage("collect")
-local grewKB = collectgarbage("count") - beforeKB
-check(("300 full sweeps allocate almost nothing (%.1f KB)"):format(grewKB), grewKB < 16)
+local churnKB = collectgarbage("count") - beforeKB
+collectgarbage("restart")
+check(("300 idle sweeps churn almost nothing (%.1f KB)"):format(churnKB), churnKB < 16)
+
+-- An aura change on one nameplate must not send the walk round all of them.
+local function ChurnOf(fn, n)
+  fn()
+  collectgarbage("collect") collectgarbage("stop")
+  local before = collectgarbage("count")
+  for _ = 1, n do fn() end
+  local kb = collectgarbage("count") - before
+  collectgarbage("restart")
+  return kb / n
+end
+
+local everything = ChurnOf(function()
+  eventFrame.scripts.OnUpdate(eventFrame, 3)          -- backstop: all plates
+end, 200)
+local onePlate = ChurnOf(function()
+  fire("UNIT_AURA", "nameplate9")
+  eventFrame.scripts.OnUpdate(eventFrame, 0.06)       -- flagged: one plate
+end, 200)
+check(("one aura change costs far less than a full sweep (%.3f vs %.3f KB)")
+  :format(onePlate, everything), onePlate < everything / 2)
 
 -- diagnostics must not blow up
 UnitIsUnit = function(a, b) return (plates[a] and plates[a].isPlayer and b == "player") or false end
