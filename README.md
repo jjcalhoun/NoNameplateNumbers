@@ -83,9 +83,15 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   came out of a Blizzard frame happens *inside* a `pcall`, never on the value
   it hands back. A secret value can never leave the addon half-applied or
   switched off for the rest of the session.
-* `NAME_PLATE_UNIT_ADDED` walks the plate once to pick up auras that were
-  already running (right after login, for instance) and to re-decide
-  enemy/friendly/personal when a nameplate is recycled onto a new unit.
+* That hook cannot see every aura cooldown: on 12.x `GetParent` is forbidden on
+  the ones in `AurasFrame.DebuffListFrame`, so there is no way up from the
+  cooldown to the nameplate. Those are found by walking *down* from the
+  nameplate instead — on `NAME_PLATE_UNIT_ADDED`, on `UNIT_AURA`, and on a
+  0.25s sweep for icons that appear with no event we can see. The walk
+  remembers the icon each cooldown sits on and the frame new icons appear in,
+  so the repeat checks look at a couple of frames per nameplate rather than the
+  whole plate. The sweep is unhooked entirely while the addon is not hiding
+  anything.
 * `SetHideCountdownNumbers` is hooked too, so if Blizzard turns the numbers
   back on for a nameplate aura, the addon puts its answer back.
 * No `CVar` is changed, so your cooldown-number settings everywhere else in the
@@ -113,6 +119,13 @@ read the output:
 * **"errors seen so far:"** — anything the addon tried and the client refused.
   These are survived rather than fatal, but they are worth reporting: they say
   exactly which call the client is blocking.
+
+## Tests
+
+`tests/mock.lua` runs the addon against a mock of the WoW API — frames,
+cooldowns, regions, events, forbidden frames and secret values — with nameplate
+shapes taken from real `/nnn debug` dumps. Run it from the addon folder with
+any Lua interpreter: `lua tests/mock.lua`. It is not loaded by the game.
 
 ## Notes
 

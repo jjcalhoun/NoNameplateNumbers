@@ -37,6 +37,10 @@ ns.defaults = {
 local tracked = setmetatable({}, { __mode = "k" })
 -- nameplate frame -> set of its cooldowns
 local plateCooldowns = setmetatable({}, { __mode = "k" })
+-- cooldown -> the aura icon it sits on, learned on the way down
+local iconOf = setmetatable({}, { __mode = "k" })
+-- nameplate frame -> the frames new aura icons appear in
+local plateContainers = setmetatable({}, { __mode = "k" })
 -- font strings we hid ourselves: region -> { alpha, shown }
 local hiddenText = setmetatable({}, { __mode = "k" })
 
@@ -298,9 +302,22 @@ end
 local function SuppressIconText(icon, hide)
 	local skip = {}
 	pcall(_collectCountRegions, icon, skip)
+
 	for _, region in ipairs(Regions(icon)) do
 		if not skip[region] and not Forbidden(region) and IsObjectType(region, "FontString") then
 			HideRegion(region, hide)
+		end
+	end
+
+	-- Blizzard parks the stack count in its own child frame (CountFrame.Count),
+	-- so a child frame stored under a count-ish key is skipped whole.
+	for _, child in ipairs(Children(icon)) do
+		if not skip[child] and not Forbidden(child) then
+			for _, region in ipairs(Regions(child)) do
+				if IsObjectType(region, "FontString") then
+					HideRegion(region, hide)
+				end
+			end
 		end
 	end
 end
@@ -308,6 +325,18 @@ end
 -- ---------------------------------------------------------------------------
 -- Applying
 -- ---------------------------------------------------------------------------
+
+-- GetParent is forbidden on 12.x nameplate aura cooldowns, so the icon is
+-- normally learned on the way down and only asked for as a last resort - once,
+-- so a refusal is not repeated on every update.
+local function IconOf(cd)
+	local icon = iconOf[cd]
+	if icon ~= nil then return icon or nil end
+
+	local ok, parent = pcall(_parentOf, cd)
+	iconOf[cd] = (ok and parent) or false
+	return iconOf[cd] or nil
+end
 
 local function _setHideNumbers(cd, hide) cd:SetHideCountdownNumbers(hide) end
 local function _setDrawSwipe(cd, draw) cd:SetDrawSwipe(draw) end
@@ -341,7 +370,7 @@ local function DoApply(cd, hide)
 	if db.forceHideText or cd.nnnTextHidden then
 		local hideText = (hide and db.forceHideText) or false
 		Try(SuppressCooldownText, cd, hideText, 0)
-		local icon = cd.GetParent and cd:GetParent()
+		local icon = IconOf(cd)
 		if icon and not Forbidden(icon) then
 			Try(SuppressIconText, icon, hideText)
 		end
@@ -375,25 +404,48 @@ local function ApplyToPlate(plate, unit)
 	end
 end
 
--- Fallback discovery: auras that were already running before we hooked (right
--- after login, or on a nameplate that just appeared) never call SetCooldown
--- again, so walk the plate once and pick up every cooldown widget in it.
-local function Discover(plate, frame, depth)
+-- Walking down from the nameplate is the only discovery that works for aura
+-- cooldowns whose parent we are not allowed to ask about. On the way it notes
+-- the icon each cooldown sits on, and the frame that icon lives in, so new
+-- auras can be picked up later without walking the whole plate again.
+local function Discover(plate, frame, depth, parent)
 	for _, child in ipairs(Children(frame)) do
 		if not Forbidden(child) then
 			if IsObjectType(child, "Cooldown") then
 				if tracked[child] ~= plate then
 					Track(child, plate)
 				end
+				iconOf[child] = frame
+				if parent then
+					local containers = plateContainers[plate]
+					if not containers then
+						containers = setmetatable({}, { __mode = "k" })
+						plateContainers[plate] = containers
+					end
+					containers[parent] = true
+				end
 			elseif depth < 6 then
-				Discover(plate, child, depth + 1)
+				Discover(plate, child, depth + 1, frame)
 			end
 		end
 	end
 end
 
 local function ScanPlate(plate, unit)
-	Try(Discover, plate, plate, 0)
+	Try(Discover, plate, plate, 0, nil)
+	ApplyToPlate(plate, unit)
+end
+
+-- The cheap version: only the frames aura icons are known to appear in.
+local function ReScan(plate, unit, allowFull)
+	local containers = plateContainers[plate]
+	if not containers or not next(containers) then
+		if allowFull == false then return end
+		return ScanPlate(plate, unit)
+	end
+	for container in pairs(containers) do
+		Try(Discover, plate, container, 4, nil)
+	end
 	ApplyToPlate(plate, unit)
 end
 
@@ -412,6 +464,8 @@ function ns.RefreshAll()
 			ApplyToCooldown(cd, ShouldHide(UnitOf(plate)))
 		end
 	end
+
+	if ns.UpdateSweep then ns.UpdateSweep() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -481,7 +535,7 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		if ns.db and IsNameplateUnit(arg1) then
 			local plate = GetNamePlateForUnit and GetNamePlateForUnit(arg1)
 			if plate then
-				ApplyToPlate(plate, arg1)
+				ReScan(plate, arg1)
 			end
 		end
 
@@ -508,6 +562,45 @@ frame:SetScript("OnEvent", function(self, event, arg1)
 		ns.RefreshAll()
 	end
 end)
+
+-- ---------------------------------------------------------------------------
+-- Safety net
+--
+-- An aura icon can appear without any event we are able to see, so the frames
+-- aura icons are known to live in get re-checked a few times a second. That is
+-- a couple of table lookups per nameplate, not a walk of the whole plate, and
+-- the whole thing is switched off while the addon is not hiding anything.
+-- ---------------------------------------------------------------------------
+
+local SWEEP_INTERVAL = 0.25
+local FULL_EVERY = 4 -- ticks, so a plate we know nothing about is walked once a second
+
+local sinceSweep, tick = 0, 0
+
+local function Sweep(self, elapsed)
+	sinceSweep = sinceSweep + elapsed
+	if sinceSweep < SWEEP_INTERVAL then return end
+	sinceSweep = 0
+
+	tick = tick + 1
+	local allowFull = (tick % FULL_EVERY) == 0
+
+	if not GetNamePlates then return end
+	local ok, plates = pcall(GetNamePlates)
+	if not ok or not plates then return end
+
+	for _, plate in ipairs(plates) do
+		ReScan(plate, nil, allowFull)
+	end
+end
+
+function ns.UpdateSweep()
+	if ns.db and ns.db.enabled then
+		frame:SetScript("OnUpdate", Sweep)
+	else
+		frame:SetScript("OnUpdate", nil)
+	end
+end
 
 -- ---------------------------------------------------------------------------
 -- Diagnostics - /nnn debug
@@ -641,8 +734,9 @@ function ns.Debug()
 
 	for i, cd in ipairs(found.cooldowns) do
 		if i > 6 then break end
-		Say(("  cooldown %s tracked=%s hidden=%s noCooldownCount=%s running=%s"):format(
+		Say(("  cooldown %s tracked=%s icon=%s hidden=%s noCooldownCount=%s running=%s"):format(
 			NameOf(cd), tostring(tracked[cd] ~= nil and tracked[cd] ~= false),
+			tostring(iconOf[cd] ~= nil and iconOf[cd] ~= false),
 			tostring(cd.nnnHidden), tostring(cd.noCooldownCount), RunningFor(cd)))
 	end
 
