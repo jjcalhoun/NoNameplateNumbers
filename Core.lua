@@ -436,15 +436,18 @@ local function ScanPlate(plate, unit)
 	ApplyToPlate(plate, unit)
 end
 
--- The cheap version: only the frames aura icons are known to appear in.
-local function ReScan(plate, unit, allowFull)
+-- The cheap version: only the frames aura icons are already known to appear
+-- in. Knowing one container is no proof we know them all - a plate carries a
+-- permanent loss-of-control frame that is found on the first walk, while the
+-- debuff list fills up later - so this never replaces the full walk, it only
+-- fills the gaps between them.
+local function ReScan(plate, unit, full)
 	local containers = plateContainers[plate]
-	if not containers or not next(containers) then
-		if allowFull == false then return end
+	if full or not containers or not next(containers) then
 		return ScanPlate(plate, unit)
 	end
 	for container in pairs(containers) do
-		Try(Discover, plate, container, 4, nil)
+		Try(Discover, plate, container, 3, nil)
 	end
 	ApplyToPlate(plate, unit)
 end
@@ -573,7 +576,7 @@ end)
 -- ---------------------------------------------------------------------------
 
 local SWEEP_INTERVAL = 0.25
-local FULL_EVERY = 4 -- ticks, so a plate we know nothing about is walked once a second
+local FULL_EVERY = 4 -- ticks, so every plate is walked in full once a second
 
 local sinceSweep, tick = 0, 0
 
@@ -583,14 +586,14 @@ local function Sweep(self, elapsed)
 	sinceSweep = 0
 
 	tick = tick + 1
-	local allowFull = (tick % FULL_EVERY) == 0
+	local full = (tick % FULL_EVERY) == 0
 
 	if not GetNamePlates then return end
 	local ok, plates = pcall(GetNamePlates)
 	if not ok or not plates then return end
 
 	for _, plate in ipairs(plates) do
-		ReScan(plate, nil, allowFull)
+		ReScan(plate, nil, full)
 	end
 end
 
@@ -731,6 +734,18 @@ function ns.Debug()
 
 	Say(("found on that plate: %d cooldowns, %d font strings, %d forbidden frames skipped")
 		:format(#found.cooldowns, #found.texts, found.forbidden))
+
+	local trackedHere, trackedAll, containers = 0, 0, 0
+	for cd, owner in pairs(tracked) do
+		if owner then
+			trackedAll = trackedAll + 1
+			if owner == plate then trackedHere = trackedHere + 1 end
+		end
+	end
+	for _ in pairs(plateContainers[plate] or {}) do containers = containers + 1 end
+	Say(("sweep: %s, tracked here: %d, tracked everywhere: %d, known aura containers here: %d")
+		:format(frame:GetScript("OnUpdate") and "running" or "OFF",
+			trackedHere, trackedAll, containers))
 
 	for i, cd in ipairs(found.cooldowns) do
 		if i > 6 then break end

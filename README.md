@@ -88,10 +88,12 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   cooldown to the nameplate. Those are found by walking *down* from the
   nameplate instead — on `NAME_PLATE_UNIT_ADDED`, on `UNIT_AURA`, and on a
   0.25s sweep for icons that appear with no event we can see. The walk
-  remembers the icon each cooldown sits on and the frame new icons appear in,
-  so the repeat checks look at a couple of frames per nameplate rather than the
-  whole plate. The sweep is unhooked entirely while the addon is not hiding
-  anything.
+  remembers the icon each cooldown sits on and the frames new icons appear in,
+  so most sweep ticks look at a couple of frames per nameplate. Knowing one
+  container is not proof of knowing them all, though — a plate carries a
+  permanent loss-of-control frame that the first walk finds while the debuff
+  list is still empty — so a full walk of every plate still runs once a second.
+  The sweep is unhooked entirely while the addon is not hiding anything.
 * `SetHideCountdownNumbers` is hooked too, so if Blizzard turns the numbers
   back on for a nameplate aura, the addon puts its answer back.
 * No `CVar` is changed, so your cooldown-number settings everywhere else in the

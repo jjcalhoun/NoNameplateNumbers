@@ -366,6 +366,39 @@ SlashCmdList.NONAMEPLATENUMBERS("on")
 check("sweep back on with the addon", eventFrame.scripts.OnUpdate ~= nil)
 check("12.1 shape hidden again", cd1.durationText.shown == false)
 
+-- The trap from a real 12.1 dump: LossOfControlFrame.AuraItemFrame exists on
+-- every plate from the start, so the first walk records LossOfControlFrame as
+-- a known container. DebuffListFrame fills up only later, and must not be
+-- written off just because some other container is already known.
+plateCount = plateCount + 1
+local trap = New("Frame", "NamePlate" .. plateCount)
+trap.namePlateUnitToken = "nameplate10"
+plates["nameplate10"] = trap
+unitFriendly["nameplate10"] = false
+local trapUF = New("Frame", nil, trap); trap.UnitFrame = trapUF
+local trapAuras = New("Frame", nil, trapUF); trapUF.AurasFrame = trapAuras
+local locFrame = New("Frame", nil, trapAuras); trapAuras.LossOfControlFrame = locFrame
+local locItem = New("Frame", nil, locFrame); locFrame.AuraItemFrame = locItem
+local locCD = New("Cooldown", nil, locItem); locItem.Cooldown = locCD
+local trapList = New("Frame", nil, trapAuras); trapAuras.DebuffListFrame = trapList
+
+fire("NAME_PLATE_UNIT_ADDED", "nameplate10")
+check("permanent loss-of-control cooldown tracked at plate add", locCD.hideNumbers == true)
+
+local function AddTrapDebuff()
+  local icon = New("Frame", nil, trapList)
+  local cd = New("Cooldown", nil, icon)
+  cd.GetParent = function() error("Attempt to access forbidden object") end
+  cd.durationText = cd:CreateFontString(); cd.durationText:SetText("10")
+  cd:SetCooldown(100, 10)
+  return cd
+end
+
+local trapCD = AddTrapDebuff()
+for _ = 1, 8 do eventFrame.scripts.OnUpdate(eventFrame, 0.3) end
+check("debuff in a container found later is still hidden",
+  trapCD.durationText.shown == false and trapCD.hideNumbers == true)
+
 -- diagnostics must not blow up
 UnitIsUnit = function(a, b) return (plates[a] and plates[a].isPlayer and b == "player") or false end
 plates["target"] = enemy
