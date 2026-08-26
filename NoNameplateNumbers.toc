@@ -1,8 +1,8 @@
-## Interface: 120000, 110207, 110205, 110200, 110105
+## Interface: 120100, 120000, 110207
 ## Title: NoNameplateNumbers
 ## Notes: Turns cooldown countdown numbers on/off for auras on the default nameplates only. Cooldown numbers everywhere else are left alone.
 ## Author: jjcalhoun
-## Version: 1.1.0
+## Version: 1.1.1
 ## SavedVariables: NoNameplateNumbersDB
 ## IconTexture: Interface\Icons\INV_Misc_PocketWatch_01
 

@@ -25,9 +25,10 @@ World of Warcraft/_retail_/Interface/AddOns/NoNameplateNumbers
 so that `.../AddOns/NoNameplateNumbers/NoNameplateNumbers.toc` exists, then
 reload the game (or `/reload`).
 
-If the client marks the addon as out of date, tick "Load out of date AddOns" in
-the AddOns list, or bump the `## Interface:` line in the `.toc` to the version
-your client reports (`/dump select(4, GetBuildInfo())`).
+The `.toc` targets retail 12.1 (interface 120100). If a later patch marks the
+addon as out of date, bump the `## Interface:` line to the number your client
+reports (`/dump select(4, GetBuildInfo())`), or tick "Load out of date AddOns"
+in the AddOns list.
 
 ## Options
 
