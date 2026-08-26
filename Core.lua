@@ -73,12 +73,36 @@ local function Try(fn, a, b, c)
 end
 ns.Try = Try
 
-local function _forbidden(obj) return obj.IsForbidden and obj:IsForbidden() end
+-- Every comparison of a value that came out of a Blizzard frame happens inside
+-- the pcall'd helper, never on the value it hands back. A secret value may be
+-- held but not read, compared or tested, and type() of a secret is itself
+-- secret, so touching one outside the pcall throws.
+local function _forbidden(obj) return (obj.IsForbidden and obj:IsForbidden()) == true end
 local function Forbidden(obj)
 	if not obj then return true end
 	local ok, res = pcall(_forbidden, obj)
 	return (not ok) or res == true
 end
+
+local function _isTrue(value) return (value and true) or false end
+-- true, false, or nil when the value cannot be read at all
+local function IsTrue(value)
+	local ok, res = pcall(_isTrue, value)
+	if not ok then return nil end
+	return res
+end
+
+local function _str(value)
+	local text = tostring(value)
+	if type(text) == "string" then return text end
+	return nil
+end
+local function Str(value)
+	local ok, text = pcall(_str, value)
+	if ok and text then return text end
+	return "<secret>"
+end
+ns.Str = Str
 
 local function _children(frame) return { frame:GetChildren() } end
 local function Children(frame)
@@ -92,35 +116,57 @@ local function Regions(frame)
 	return ok and list or EMPTY
 end
 
-local function _objectType(obj) return obj:GetObjectType() end
-local function ObjectType(obj)
-	local ok, kind = pcall(_objectType, obj)
-	return ok and kind or nil
+local function _isShown(obj) return obj:IsShown() == true end
+local function Shown(obj)
+	local ok, shown = pcall(_isShown, obj)
+	return ok and shown == true
+end
+
+local function _alphaOf(region)
+	local alpha = region:GetAlpha()
+	if type(alpha) == "number" then return alpha end
+	return nil
+end
+local function AlphaOf(region)
+	local ok, alpha = pcall(_alphaOf, region)
+	if ok and alpha then return alpha end
+	return 1
+end
+
+local function _isObjectType(obj, kind) return obj:GetObjectType() == kind end
+local function IsObjectType(obj, kind)
+	local ok, res = pcall(_isObjectType, obj, kind)
+	return ok and res == true
 end
 
 -- ---------------------------------------------------------------------------
 -- Which nameplate does a cooldown belong to?
 -- ---------------------------------------------------------------------------
 
-local function _findNamePlate(frame)
+local function _isNamePlate(frame)
+	if frame.namePlateUnitToken ~= nil then return true end
+	local name = frame.GetName and frame:GetName()
+	return (name and strmatch(name, "^NamePlate%d+$")) ~= nil
+end
+
+local function _parentOf(frame)
+	return frame.GetParent and frame:GetParent()
+end
+
+-- Checked one frame at a time: a frame whose name cannot be read must not end
+-- the walk, or every cooldown below it is written off as "not a nameplate".
+local function FindNamePlate(frame)
 	local depth = 0
 	while frame and depth < 12 do
-		if frame.namePlateUnitToken ~= nil then
-			return frame
-		end
-		local name = frame.GetName and frame:GetName()
-		if name and strmatch(name, "^NamePlate%d+$") then
-			return frame
-		end
-		frame = frame.GetParent and frame:GetParent()
+		local ok, isPlate = pcall(_isNamePlate, frame)
+		if ok and isPlate == true then return frame end
+
+		local climbed, parent = pcall(_parentOf, frame)
+		if not climbed then return nil end
+		frame = parent
 		depth = depth + 1
 	end
 	return nil
-end
-
-local function FindNamePlate(frame)
-	local ok, plate = pcall(_findNamePlate, frame)
-	return ok and plate or nil
 end
 
 local function Track(cd, plate)
@@ -169,11 +215,12 @@ end
 
 local function ShouldHide(unit)
 	local ok, hide = pcall(_shouldHide, unit)
-	if not ok then
-		Note(hide)
-		return false
-	end
-	return hide
+	if ok then return hide end
+	-- Could not tell friend from foe: fall back to the enemy setting rather
+	-- than quietly stopping.
+	Note(hide)
+	local db = ns.db
+	return (db and db.enabled and db.enemy) or false
 end
 
 -- ---------------------------------------------------------------------------
@@ -198,7 +245,7 @@ end
 -- Regions the icon keeps under a stack-count style key, which must stay visible.
 local function _collectCountRegions(icon, skip)
 	for key, value in pairs(icon) do
-		if type(key) == "string" and type(value) == "table" and LooksLikeCount(key) then
+		if type(key) == "string" and LooksLikeCount(key) then
 			skip[value] = true
 		end
 	end
@@ -207,7 +254,8 @@ end
 local function _hideRegion(region, hide)
 	if hide then
 		if not hiddenText[region] then
-			hiddenText[region] = { alpha = region:GetAlpha(), shown = region:IsShown() }
+			-- keep only plain values: a secret alpha would make restoring throw
+			hiddenText[region] = { alpha = AlphaOf(region), shown = Shown(region) }
 		end
 		-- alpha as well as hiding: an OnUpdate that only calls SetText and
 		-- Show cannot bring the text back.
@@ -232,7 +280,7 @@ end
 -- Font strings on the cooldown itself, and in any small child frame of it.
 local function SuppressCooldownText(frame, hide, depth)
 	for _, region in ipairs(Regions(frame)) do
-		if not Forbidden(region) and ObjectType(region) == "FontString" then
+		if not Forbidden(region) and IsObjectType(region, "FontString") then
 			HideRegion(region, hide)
 		end
 	end
@@ -251,7 +299,7 @@ local function SuppressIconText(icon, hide)
 	local skip = {}
 	pcall(_collectCountRegions, icon, skip)
 	for _, region in ipairs(Regions(icon)) do
-		if not skip[region] and not Forbidden(region) and ObjectType(region) == "FontString" then
+		if not skip[region] and not Forbidden(region) and IsObjectType(region, "FontString") then
 			HideRegion(region, hide)
 		end
 	end
@@ -333,7 +381,7 @@ end
 local function Discover(plate, frame, depth)
 	for _, child in ipairs(Children(frame)) do
 		if not Forbidden(child) then
-			if ObjectType(child) == "Cooldown" then
+			if IsObjectType(child, "Cooldown") then
 				if tracked[child] ~= plate then
 					Track(child, plate)
 				end
@@ -394,7 +442,11 @@ local function HookCooldownWidgets()
 	-- cooldown, so put our answer back when that happens on a nameplate.
 	if type(index.SetHideCountdownNumbers) == "function" then
 		hooksecurefunc(index, "SetHideCountdownNumbers", function(self, value)
-			if applying or value then return end
+			if applying then return end
+			-- Blizzard passes a secret boolean here for nameplate auras, so the
+			-- argument can only be inspected through IsTrue. When it cannot be
+			-- read at all, re-apply: asking for hidden twice costs nothing.
+			if IsTrue(value) == true then return end
 			local plate = PlateOf(self)
 			if plate and ShouldHide(UnitOf(plate)) then
 				self.nnnHidden = nil
@@ -410,6 +462,14 @@ end
 -- Events
 -- ---------------------------------------------------------------------------
 
+local function _isNameplateUnit(unit)
+	return type(unit) == "string" and strsub(unit, 1, 9) == "nameplate"
+end
+local function IsNameplateUnit(unit)
+	local ok, res = pcall(_isNameplateUnit, unit)
+	return ok and res == true
+end
+
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
@@ -418,7 +478,7 @@ frame:RegisterEvent("UNIT_AURA")
 
 frame:SetScript("OnEvent", function(self, event, arg1)
 	if event == "UNIT_AURA" then
-		if ns.db and type(arg1) == "string" and strsub(arg1, 1, 9) == "nameplate" then
+		if ns.db and IsNameplateUnit(arg1) then
 			local plate = GetNamePlateForUnit and GetNamePlateForUnit(arg1)
 			if plate then
 				ApplyToPlate(plate, arg1)
@@ -458,14 +518,28 @@ local function Say(text)
 end
 ns.Say = Say
 
+-- Frame names are secret too on 12.x nameplate aura frames, so the check for a
+-- usable name happens inside the pcall.
+local function _usableName(name)
+	if type(name) == "string" and name ~= "" then return name end
+	return nil
+end
+local function _debugName(obj)
+	return _usableName(obj.GetDebugName and obj:GetDebugName())
+end
+local function _plainName(obj)
+	return _usableName(obj.GetName and obj:GetName())
+end
+
 local function NameOf(obj)
-	if obj.GetDebugName then
-		local ok, name = pcall(obj.GetDebugName, obj)
-		if ok and type(name) == "string" and name ~= "" then return name end
-	end
-	local ok, name = pcall(obj.GetName, obj)
-	if ok and type(name) == "string" then return name end
-	return "<unnamed>"
+	local ok, name = pcall(_debugName, obj)
+	if ok and name then return name end
+	local secret = not ok
+
+	local plainOk, plain = pcall(_plainName, obj)
+	if plainOk and plain then return plain end
+
+	return (secret or not plainOk) and "<secret name>" or "<unnamed>"
 end
 
 -- Aura text is secret on modern clients: it can be held but not read or
@@ -484,18 +558,12 @@ local function TextOf(region)
 	return text
 end
 
-local function _isShown(obj) return obj:IsShown() end
-local function Shown(obj)
-	local ok, shown = pcall(_isShown, obj)
-	return ok and shown == true
-end
-
 -- Everything the walk finds under a nameplate, for the report.
 local function Survey(frame, depth, found)
 	for _, region in ipairs(Regions(frame)) do
 		if Forbidden(region) then
 			found.forbidden = found.forbidden + 1
-		elseif ObjectType(region) == "FontString" then
+		elseif IsObjectType(region, "FontString") then
 			found.texts[#found.texts + 1] = {
 				text = TextOf(region),
 				name = NameOf(region),
@@ -509,7 +577,7 @@ local function Survey(frame, depth, found)
 		if Forbidden(child) then
 			found.forbidden = found.forbidden + 1
 		else
-			if ObjectType(child) == "Cooldown" then
+			if IsObjectType(child, "Cooldown") then
 				found.cooldowns[#found.cooldowns + 1] = child
 			end
 			if depth < 8 then
@@ -557,13 +625,14 @@ function ns.Debug()
 	end
 
 	local unit = UnitOf(plate)
+	local friendOk, friend = pcall(UnitIsFriend, "player", unit)
 	Say(("target plate: %s unit=%s friend=%s -> should hide = %s"):format(
-		NameOf(plate), tostring(unit), tostring(unit and UnitIsFriend("player", unit)),
+		NameOf(plate), Str(unit), friendOk and Str(friend) or "<secret>",
 		tostring(ShouldHide(unit))))
 
 	local ok, found = pcall(Survey, plate, 0, { texts = {}, cooldowns = {}, forbidden = 0 })
 	if not ok then
-		Say("scan failed: " .. tostring(found))
+		Say("scan failed: " .. Str(found))
 		return
 	end
 

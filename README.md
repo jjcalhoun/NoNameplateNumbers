@@ -74,12 +74,15 @@ look for `UnitFrame.BuffFrame` or `button.Cooldown` at all.
   looks like a stack count are left alone.
 * Nameplates can contain forbidden frames, and touching one throws, so every
   walk skips them instead of dying halfway through.
-* On 12.0 and later a lot of aura data is a **secret value**: an addon may hold
-  it but not read or compare it, and trying throws. Nothing here reads aura
-  text or duration to do its job — which font string is the duration and which
-  is the stack count is decided from the key Blizzard stored it under — and
-  every call into a Blizzard frame is wrapped, so a secret value can never
-  leave the addon half-applied or switched off for the rest of the session.
+* On 12.0 and later a lot of nameplate data is a **secret value**: an addon may
+  hold it but not read, compare or even `type()` it, and trying throws. That
+  covers aura text and duration, frame names, and the argument Blizzard passes
+  to `SetHideCountdownNumbers`. So nothing here reads aura data to do its job —
+  which font string is the duration and which is the stack count is decided
+  from the key Blizzard stored it under — and every comparison of a value that
+  came out of a Blizzard frame happens *inside* a `pcall`, never on the value
+  it hands back. A secret value can never leave the addon half-applied or
+  switched off for the rest of the session.
 * `NAME_PLATE_UNIT_ADDED` walks the plate once to pick up auras that were
   already running (right after login, for instance) and to re-decide
   enemy/friendly/personal when a nameplate is recycled onto a new unit.
